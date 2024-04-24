@@ -2,14 +2,19 @@ import os
 from openai import OpenAI
 import json
 import requests
+from docx import Document
+from docx.shared import Inches
 
+doc = Document()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 class Aligner:
-    def __init__(self, transcription, slides):
+    def __init__(self, transcription, slides, frame_folder, notes_folder):
         self.transcription = transcription
         self.slides = slides
+        self.frame_folder = frame_folder
+        self.notes_folder = notes_folder
         self.aligned = []
 
     # TRANSCRIPTION:
@@ -46,7 +51,7 @@ class Aligner:
     # for each slide, find the corresponding transcription and align them
     # join the aligned text and give to chatgpt api to generate bullet points
 
-    def align(self):
+    def align_old(self):
         # First, sort slides based on timestamp
         sorted_slides = sorted(self.slides, key=lambda x: x['timestamp'])
 
@@ -172,6 +177,106 @@ class Aligner:
             })
             self.save_aligned()
         return self.aligned
+
+    def get_bullet_points(self, full_slide_text):
+        print(full_slide_text)
+        api_base = "https://api.endpoints.anyscale.com/v1"
+        s = requests.Session()
+        content = ""
+
+        # Prepare the payload for the API request
+        payload = {
+            "model": "meta-llama/Llama-3-70b-chat-hf",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": '''
+                    Please provide bullet points for the slide. This should be just formatting. Do not change any words you are given.
+
+                    Ignore references to Lawrence Goedde, he is the professor.
+                    If there is no content or it is jibberish, please write 'No content' or 'Not Relevant' in the content field.
+
+                    Use the following formatting for your response with no extra information. Do not do multiple groups of bullet points.
+                    All bullet points should be in one group. Do not include the bullet point, just newline separated text:
+
+                    BULLET_POINT_1\nBULLET_POINT_2\nBULLET_POINT_3\n...etc.
+
+                    OR
+
+                    NO CONTENT
+                    '''
+                },
+                {
+                    "role": "user",
+                    "content": f'''
+                    SLIDE CONTENT:
+                    {full_slide_text}
+                    '''
+                }
+            ],
+            "temperature": 0.1,
+            "max_tokens": 300,
+            "top_p": 0.95,
+            "top_k": 40,
+            "min_p": 0.05,
+            "presence_penalty": 0,
+            "frequency_penalty": 0,
+            "repeat_penalty": 1.1,
+            "stream": False
+        }
+
+        # Send the API request
+        response = s.post(f"{api_base}/chat/completions", json=payload, stream=False,
+                          headers={"Authorization": f"Bearer {os.getenv('ANY_SCALE_TOKEN')}"})
+        if response.status_code == 200:
+            print(response.json())
+            content = response.json()["choices"][0]["message"]["content"]
+            print(content)
+            return content.split("\n")
+        else:
+            print(f"API call failed with status code: {response.status_code}")
+            return ["API call failed, unable to retrieve bullet points"]
+
+    def align(self):
+        sorted_slides = sorted(self.slides, key=lambda x: x['timestamp'])
+        print(sorted_slides)
+        doc = Document()
+
+        for i in range(len(sorted_slides)):
+            current_slide = sorted_slides[i]
+            print(current_slide)
+            current_start_time = current_slide['timestamp']
+
+            if i < len(sorted_slides) - 1:
+                next_start_time = sorted_slides[i + 1]['timestamp']
+            else:
+                # Using infinity to handle the last slide
+                next_start_time = float('inf')
+
+            slide_text_segments = []
+            for segment in self.transcription:
+                segment_start = segment['start'] * 1000
+                segment_end = segment['end'] * 1000
+
+                # Check if the segment falls within the current slide's timeframe
+                if segment_start >= current_start_time and segment_start < next_start_time:
+                    slide_text_segments.append(segment['text'])
+                    print(f"Assigned to slide {i}: {segment['text']}")
+
+            full_slide_text = ' '.join(slide_text_segments)
+            # bullet_points = self.get_bullet_points(full_slide_text)
+
+            img_path = os.path.join(
+                self.frame_folder, f"frame_{current_slide['frame_number']}.jpg")
+            try:
+                doc.add_picture(img_path, width=Inches(6))
+            except FileNotFoundError:
+                doc.add_paragraph("Image not found.")
+
+            doc.add_paragraph(full_slide_text)
+            doc.save(self.notes_folder + ".docx")
+
+        return doc
 
     def save_aligned(self):
         with open("aligned.json", "w") as f:

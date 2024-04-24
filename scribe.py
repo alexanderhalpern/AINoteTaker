@@ -22,7 +22,7 @@ class Scribe:
     def transcribe(self):
         self.transcription = self.model.transcribe(
             self.audio,
-            batch_size=16
+            batch_size=8
         )
         # self.transcription = whisperx.align(
         #     self.transcription["segments"],
